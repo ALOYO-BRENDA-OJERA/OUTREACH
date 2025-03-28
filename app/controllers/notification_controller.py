@@ -1,14 +1,18 @@
 from flask import Blueprint, request, jsonify
 from app.models.notification_model import Notification
 from app.models.donor_model import Donor
-from app.models.blood_request_model import Hospital
+from app.models.blood_request_model import BloodRequest
 from app import db
 from sqlalchemy.exc import SQLAlchemyError
 from werkzeug.exceptions import NotFound, BadRequest
-from africastalking import AfricaTalking
+import africastalking
+
+
+
 
 # Initialize Africa's Talking API
-africastalking = AfricaTalking(username="your_username", api_key="your_api_key")
+africastalking.initialize(username="your_username", api_key="your_api_key")
+
 
 # Define the Blueprint for handling notifications
 notification_blueprint = Blueprint('notification_blueprint', __name__)

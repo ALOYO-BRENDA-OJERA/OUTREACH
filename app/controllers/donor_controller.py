@@ -29,7 +29,7 @@ def get_donor(id):
         return jsonify({'error': 'Database error occurred'}), 500  # Handle DB error
 
 # POST a new donor
-@donor_bp.route('/', methods=['POST'])
+@donor_bp.route('/ccreate_donor', methods=['POST'])
 def create_donor():
     try:
         data = request.get_json()  # Get JSON data from the request

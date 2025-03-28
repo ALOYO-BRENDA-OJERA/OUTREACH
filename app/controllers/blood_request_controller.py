@@ -1,14 +1,15 @@
 from flask import Blueprint, request, jsonify
-from app.models import Donor
+from app.models.donor_model import Donor
 from app import db
 from werkzeug.exceptions import NotFound, BadRequest
 from sqlalchemy.exc import SQLAlchemyError
 
-blood_request_bp = Blueprint('donor', __name__)
+blood_request_bp = Blueprint('blood_request', __name__)
 
 # GET all donors
 @blood_request_bp.route('/', methods=['GET'])
 def get_donors():
+    
     try:
         donors = Donor.query.all()  # Fetch all donors
         return jsonify([donor.to_dict() for donor in donors]), 200  # Return as JSON
