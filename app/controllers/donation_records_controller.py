@@ -12,7 +12,7 @@ import traceback
 donation_blueprint = Blueprint('donation', __name__, url_prefix='/api/v1/donor_records')
 
 # GET all donation records
-@donation_blueprint.route('/records', methods=['GET'])
+@donation_blueprint.route('/get_all_records', methods=['GET'])
 def get_donation_records():
     try:
         donation_records = DonationRecord.query.all()

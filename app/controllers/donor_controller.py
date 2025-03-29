@@ -7,7 +7,7 @@ from sqlalchemy.exc import SQLAlchemyError
 donor_bp = Blueprint('donor', __name__, url_prefix='/api/v1/donors')
 
 # GET all donors
-@donor_bp.route('/', methods=['GET'])
+@donor_bp.route('/get_all_donors', methods=['GET'])
 def get_donors():
     try:
         donors = Donor.query.all()  # Fetch all donors

@@ -16,7 +16,7 @@ africastalking.initialize(username="your_username", api_key="your_api_key")
 notification_blueprint = Blueprint('notification_blueprint', __name__, url_prefix='/api/v1/notifications')
 
 # GET all notifications
-@notification_blueprint.route('/', methods=['GET'])
+@notification_blueprint.route('/get_all_notifications', methods=['GET'])
 def get_notifications():
     try:
         notifications = Notification.query.all()  # Fetch all notifications
@@ -38,7 +38,7 @@ def get_notification(id):
         return jsonify({'error': 'Database error occurred'}), 500  # Handle DB error
 
 # POST a new notification
-@notification_blueprint.route('/', methods=['POST'])
+@notification_blueprint.route('/create_notification', methods=['POST'])
 def create_notification():
     try:
         data = request.get_json()  # Get JSON data from the request
@@ -86,7 +86,7 @@ def create_notification():
         return jsonify({'error': 'Database error occurred'}), 500  # Handle DB error
 
 # PUT to update an existing notification
-@notification_blueprint.route('/<int:id>', methods=['PUT'])
+@notification_blueprint.route('/update_notification<int:id>', methods=['PUT'])
 def update_notification(id):
     try:
         data = request.get_json()  # Get JSON data from the request

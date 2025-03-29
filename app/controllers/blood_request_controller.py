@@ -141,23 +141,23 @@ def delete_blood_request(id):
     
     
     
-    # In your blood request controller
-@blood_request_bp.route('/<int:id>', methods=['GET'])
-def get_blood_request(id):
-    try:
-        request = BloodRequest.query.get(id)
-        if not request:
-            raise NotFound('Blood request not found')
+#     # In your blood request controller
+# @blood_request_bp.route('/<int:id>', methods=['GET'])
+# def get_blood_request(id):
+#     try:
+#         request = BloodRequest.query.get(id)
+#         if not request:
+#             raise NotFound('Blood request not found')
             
-        # Get the match count
-        match_count = DonorMatch.query.filter_by(request_id=id).count()
+#         # Get the match count
+#         match_count = DonorMatch.query.filter_by(request_id=id).count()
         
-        response = request.to_dict()
-        response['match_count'] = match_count
+#         response = request.to_dict()
+#         response['match_count'] = match_count
         
-        return jsonify(response), 200
-    except NotFound as e:
-        return jsonify({'error': str(e)}), 404
-    except SQLAlchemyError as e:
-        return jsonify({'error': 'Database error occurred'}), 500
+#         return jsonify(response), 200
+#     except NotFound as e:
+#         return jsonify({'error': str(e)}), 404
+#     except SQLAlchemyError as e:
+#         return jsonify({'error': 'Database error occurred'}), 500
 

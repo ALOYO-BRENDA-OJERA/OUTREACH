@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import datetime, timedelta
 from flask import Blueprint, request, jsonify
 from app.models.donor_match_model import DonorMatch
 from app.models.donor_model import Donor
@@ -7,264 +7,11 @@ from app import db
 from sqlalchemy.exc import SQLAlchemyError
 from werkzeug.exceptions import NotFound, BadRequest
 import requests
+from geopy.distance import geodesic
 
 # Define Blueprint for the Donor Match controller
 donor_match_bp = Blueprint('donor_match_bp', __name__, url_prefix='/api/v1/donor_matches')
 
-# GET all donor matches
-@donor_match_bp.route('/', methods=['GET'])
-def get_donor_matches():
-    try:
-        matches = DonorMatch.query.all()  # Fetch all donor match records
-        return jsonify([match.to_dict() for match in matches]), 200  # Return as JSON
-    except SQLAlchemyError as e:
-        return jsonify({'error': 'Database error occurred'}), 500  # Handle database errors
-
-# GET a specific donor match by ID
-@donor_match_bp.route('/<int:id>', methods=['GET'])
-def get_donor_match(id):
-    try:
-        match = DonorMatch.query.get(id)  # Fetch donor match by ID
-        if not match:
-            raise NotFound('Donor match not found')
-        return jsonify(match.to_dict()), 200  # Return donor match record as JSON
-    except NotFound as e:
-        return jsonify({'error': str(e)}), 404  # If donor match is not found
-    except SQLAlchemyError as e:
-        return jsonify({'error': 'Database error occurred'}), 500  # Handle DB error
-
-# POST a new donor match
-@donor_match_bp.route('/create_match', methods=['POST'])
-def create_donor_match():
-    try:
-        data = request.get_json()  # Get JSON data from the request
-        if not data:
-            raise BadRequest('No input data provided')
-            
-        # Validate incoming data
-        if 'request_id' not in data or 'donor_id' not in data:
-            raise BadRequest('Missing required fields: request_id or donor_id')
-            
-        # Fetch the associated blood request and donor to ensure they exist
-        blood_request = BloodRequest.query.get(data['request_id'])
-        donor = Donor.query.get(data['donor_id'])
-            
-        if not blood_request or not donor:
-            raise NotFound('Blood request or Donor not found')
-            
-        # Create a new donor match record object
-        new_match = DonorMatch(
-            request_id=data['request_id'],
-            donor_id=data['donor_id'],
-            status=data.get('status', 'Pending'),  # Default status is 'Pending'
-            notified_at=datetime.utcnow()
-        )
-            
-        db.session.add(new_match)
-        db.session.commit()  # Commit the transaction
-        
-        # Send notification to the donor about the match
-        try:
-            # Create message
-            message = f"Hello {donor.name}, you have been matched with a blood request. " \
-                     f"Blood type needed: {blood_request.blood_type}, " \
-                     f"Urgency: {blood_request.urgency_level}. " \
-                     f"Please respond if you can donate."
-            
-            # Prepare notification data
-            notification_data = {
-                'donor_id': donor.id,
-                'request_id': blood_request.id,
-                'message': message
-            }
-            
-            # Send the notification
-            notification_response = requests.post(
-                "http://localhost:5000/api/v1/notifications/",
-                json=notification_data
-            )
-            
-            # Update match status if notification was sent successfully
-            if notification_response.status_code == 201:
-                new_match.status = 'Notified'
-                db.session.commit()
-        except Exception as e:
-            # Log the error but don't fail the match creation
-            print(f"Error sending notification: {str(e)}")
-            
-        return jsonify(new_match.to_dict()), 201  # Return the new donor match record as JSON
-    except BadRequest as e:
-        return jsonify({'error': str(e)}), 400  # Handle bad request error
-    except NotFound as e:
-        return jsonify({'error': str(e)}), 404  # Handle not found error
-    except SQLAlchemyError as e:
-        db.session.rollback()  # Rollback in case of DB error
-        return jsonify({'error': 'Database error occurred'}), 500  # Handle DB error
-
-# PUT to update an existing donor match
-@donor_match_bp.route('/<int:id>', methods=['PUT'])
-def update_donor_match(id):
-    try:
-        data = request.get_json()  # Get JSON data from the request
-        if not data:
-            raise BadRequest('No input data provided')
-            
-        # Find the donor match record by ID
-        match = DonorMatch.query.get(id)
-        if not match:
-            raise NotFound('Donor match not found')
-            
-        # Get the previous status to check for status changes
-        previous_status = match.status
-            
-        # Update the status if provided
-        if 'status' in data:
-            match.status = data['status']
-        if 'notified_at' in data:
-            match.notified_at = datetime.strptime(data['notified_at'], '%Y-%m-%d %H:%M:%S')
-            
-        db.session.commit()  # Commit the changes
-        
-        # Send notifications based on status changes
-        if 'status' in data and previous_status != data['status']:
-            try:
-                # Get the donor and blood request
-                donor = Donor.query.get(match.donor_id)
-                blood_request = BloodRequest.query.get(match.request_id)
-                
-                if donor and blood_request:
-                    # Different messages based on the new status
-                    if data['status'] == 'Accepted':
-                        # Notify the donor that they've accepted
-                        donor_message = f"Thank you for accepting the blood donation request. " \
-                                       f"The blood bank will contact you with further details."
-                        
-                        # Notify the requester that a donor has accepted
-                        requester = Donor.query.get(blood_request.requester_id)
-                        if requester:
-                            requester_message = f"Good news! A donor has accepted to donate for your blood request. " \
-                                              f"The blood bank will contact you with further details."
-                            
-                            # Send notification to requester
-                            requester_notification = {
-                                'donor_id': requester.id,
-                                'request_id': blood_request.id,
-                                'message': requester_message
-                            }
-                            
-                            requests.post(
-                                "http://localhost:5000/api/v1/notifications/",
-                                json=requester_notification
-                            )
-                        
-                        # Also update the blood request status
-                        blood_request.status = 'Matched'
-                        db.session.commit()
-                        
-                    elif data['status'] == 'Declined':
-                        # Notify the donor that they've declined
-                        donor_message = f"You have declined the blood donation request. " \
-                                       f"Thank you for your consideration."
-                        
-                        # Try to find another match for this request
-                        try:
-                            # Find potential matches
-                            compatible_types = get_compatible_blood_types(blood_request.blood_type)
-                            potential_donors = Donor.query.filter(
-                                Donor.blood_type.in_(compatible_types),
-                                Donor.is_available == True,
-                                Donor.id != donor.id  # Exclude the donor who declined
-                            ).all()
-                            
-                            # Create a new match with the first available donor
-                            if potential_donors:
-                                new_donor = potential_donors[0]
-                                new_match_data = {
-                                    'request_id': blood_request.id,
-                                    'donor_id': new_donor.id
-                                }
-                                
-                                requests.post(
-                                    "http://localhost:5000/api/v1/donor_matches/create_match",
-                                    json=new_match_data
-                                )
-                        except Exception as e:
-                            print(f"Error finding new match: {str(e)}")
-                    
-                    elif data['status'] == 'Completed':
-                        # Notify the donor that donation is complete
-                        donor_message = f"Thank you for your blood donation! " \
-                                       f"Your generosity helps save lives."
-                        
-                        # Notify the requester that donation is complete
-                        requester = Donor.query.get(blood_request.requester_id)
-                        if requester:
-                            requester_message = f"Good news! The blood donation for your request has been completed. " \
-                                              f"Thank you for using our service."
-                            
-                            # Send notification to requester
-                            requester_notification = {
-                                'donor_id': requester.id,
-                                'request_id': blood_request.id,
-                                'message': requester_message
-                            }
-                            
-                            requests.post(
-                                "http://localhost:5000/api/v1/notifications/",
-                                json=requester_notification
-                            )
-                        
-                        # Update the blood request status
-                        blood_request.status = 'Completed'
-                        db.session.commit()
-                    
-                    else:
-                        # Default message for other status changes
-                        donor_message = f"Your blood donation match status has been updated to: {data['status']}."
-                    
-                    # Send notification to the donor
-                    donor_notification = {
-                        'donor_id': donor.id,
-                        'request_id': blood_request.id,
-                        'message': donor_message
-                    }
-                    
-                    requests.post(
-                        "http://localhost:5000/api/v1/notifications/",
-                        json=donor_notification
-                    )
-            except Exception as e:
-                # Log the error but don't fail the update operation
-                print(f"Error sending status change notification: {str(e)}")
-            
-        return jsonify(match.to_dict()), 200  # Return updated donor match record as JSON
-    except BadRequest as e:
-        return jsonify({'error': str(e)}), 400  # Handle bad request error
-    except NotFound as e:
-        return jsonify({'error': str(e)}), 404  # Handle not found error
-    except SQLAlchemyError as e:
-        db.session.rollback()  # Rollback in case of DB error
-        return jsonify({'error': 'Database error occurred'}), 500  # Handle DB error
-
-# DELETE a donor match by ID
-@donor_match_bp.route('/<int:id>', methods=['DELETE'])
-def delete_donor_match(id):
-    try:
-        match = DonorMatch.query.get(id)
-        if not match:
-            raise NotFound('Donor match not found')
-            
-        db.session.delete(match)  # Delete the donor match record
-        db.session.commit()  # Commit the changes
-            
-        return jsonify({'message': 'Donor match deleted successfully'}), 200
-    except NotFound as e:
-        return jsonify({'error': str(e)}), 404  # Handle not found error
-    except SQLAlchemyError as e:
-        db.session.rollback()  # Rollback in case of DB error
-        return jsonify({'error': 'Database error occurred'}), 500  # Handle DB error
-
-# Helper function to get compatible blood types
 def get_compatible_blood_types(blood_type):
     """Return list of blood types compatible with the given blood type"""
     compatibility = {
@@ -279,177 +26,323 @@ def get_compatible_blood_types(blood_type):
     }
     return compatibility.get(blood_type, [])
 
-# Find potential matches for a specific blood request
-@donor_match_bp.route('/find-matches/<int:request_id>', methods=['GET'])
-def find_potential_matches(request_id):
+@donor_match_bp.route('/', methods=['GET'])
+def get_donor_matches():
     try:
-        # Get the blood request
-        blood_request = BloodRequest.query.get(request_id)
-        if not blood_request:
-            raise NotFound('Blood request not found')
+        matches = DonorMatch.query.all()
+        matches_data = []
+        for match in matches:
+            match_data = match.to_dict()
+            donor = Donor.query.get(match.donor_id)
+            blood_request = BloodRequest.query.get(match.request_id)
             
-        # Find compatible blood types
-        compatible_types = get_compatible_blood_types(blood_request.blood_type)
+            if donor:
+                match_data['donor_details'] = {
+                    'name': donor.name,
+                    'blood_type': donor.blood_type,
+                    'location': donor.location,
+                    'contact': donor.phone,
+                    'availability_status': donor.availability_status,
+                    'last_donation_date': donor.last_donation_date.isoformat() if donor.last_donation_date else None
+                }
+            if blood_request:
+                match_data['request_details'] = {
+                    'patient_name': blood_request.name,  # Changed from patient_name
+                    'blood_type': blood_request.blood_type,
+                    'hospital': blood_request.hospital.name if blood_request.hospital else None,  # Changed from hospital_name
+                    'urgency': blood_request.urgency_level
+                }
+            matches_data.append(match_data)
             
-        # Find donors with compatible blood type who are available
-        potential_donors = Donor.query.filter(
-            Donor.blood_type.in_(compatible_types),
-            Donor.is_available == True
-        ).all()
-            
-        # You could add more filtering logic here (distance calculation, etc.)
-            
-        return jsonify([donor.to_dict() for donor in potential_donors]), 200
+        return jsonify(matches_data), 200
+    except SQLAlchemyError as e:
+        return jsonify({'error': 'Database error occurred'}), 500
+
+@donor_match_bp.route('/<int:id>', methods=['GET'])
+def get_donor_match(id):
+    try:
+        match = DonorMatch.query.get(id)
+        if not match:
+            raise NotFound('Donor match not found')
         
+        match_data = match.to_dict()
+        donor = Donor.query.get(match.donor_id)
+        blood_request = BloodRequest.query.get(match.request_id)
+        
+        if donor:
+            match_data['donor_details'] = {
+                'name': donor.name,
+                'blood_type': donor.blood_type,
+                'location': donor.location,
+                'contact': donor.phone,
+                'availability_status': donor.availability_status,
+                'last_donation_date': donor.last_donation_date.isoformat() if donor.last_donation_date else None
+            }
+        
+        if blood_request:
+            match_data['request_details'] = {
+                'patient_name': blood_request.name,  # Changed
+                'blood_type': blood_request.blood_type,
+                'hospital': blood_request.hospital.name if blood_request.hospital else None,  # Changed
+                'urgency': blood_request.urgency_level,
+                'location': blood_request.location
+            }
+            
+            if blood_request.location and donor and donor.location:
+                try:
+                    req_lat, req_long = map(float, blood_request.location.split(','))
+                    donor_lat, donor_long = map(float, donor.location.split(','))
+                    distance = geodesic((req_lat, req_long), (donor_lat, donor_long)).km
+                    match_data['distance_km'] = round(distance, 2)
+                except:
+                    pass
+        
+        return jsonify(match_data), 200
     except NotFound as e:
         return jsonify({'error': str(e)}), 404
     except SQLAlchemyError as e:
         return jsonify({'error': 'Database error occurred'}), 500
-    
-    
-    # Automatically create matches for all pending blood requests
-@donor_match_bp.route('/batch-match', methods=['POST'])
-def batch_match_donors():
+
+@donor_match_bp.route('/auto-match/<int:request_id>', methods=['POST'])
+def auto_match_donors(request_id):
     try:
-        # Get all pending blood requests
-        pending_requests = BloodRequest.query.filter_by(status='Pending').all()
-        matches_created = 0
-        requests_with_no_matches = []
+        blood_request = BloodRequest.query.get(request_id)
+        if not blood_request:
+            raise NotFound('Blood request not found')
+        
+        compatible_types = get_compatible_blood_types(blood_request.blood_type)
+        cutoff_date = datetime.utcnow() - timedelta(days=90)
+        
+        # Base query for eligible donors
+        base_query = Donor.query.filter(
+            Donor.blood_type.in_(compatible_types),
+            Donor.availability_status == True,
+            (Donor.last_donation_date == None) | 
+            (Donor.last_donation_date < cutoff_date)
+        )
+        
+        donors_to_match = []
+        if blood_request.location:
+            try:
+                req_lat, req_long = map(float, blood_request.location.split(','))
+                all_donors = base_query.filter(Donor.location.isnot(None)).all()
+                
+                nearby_donors = []
+                for donor in all_donors:
+                    try:
+                        donor_lat, donor_long = map(float, donor.location.split(','))
+                        distance = geodesic((req_lat, req_long), (donor_lat, donor_long)).km
+                        if distance <= 50:
+                            donor.distance = distance
+                            nearby_donors.append(donor)
+                    except:
+                        continue
+                
+                nearby_donors.sort(key=lambda x: x.distance)
+                donors_to_match.extend(nearby_donors)
+                
+                other_donors = base_query.filter(
+                    ~Donor.id.in_([d.id for d in nearby_donors])
+                ).all()
+                donors_to_match.extend(other_donors)
+            except:
+                donors_to_match = base_query.all()
+        else:
+            donors_to_match = base_query.all()
+        
+        matches_created = []
+        for donor in donors_to_match:
+            existing_match = DonorMatch.query.filter_by(
+                request_id=blood_request.id,
+                donor_id=donor.id
+            ).first()
             
-        for request in pending_requests:
-            # Find compatible donors
-            compatible_types = get_compatible_blood_types(request.blood_type)
-            potential_donors = Donor.query.filter(
-                Donor.blood_type.in_(compatible_types),
-                Donor.is_available == True
-            ).all()
-            
-            if not potential_donors:
-                # No matches found for this request
-                requests_with_no_matches.append(request.id)
+            if not existing_match:
+                new_match = DonorMatch(
+                    request_id=blood_request.id,
+                    donor_id=donor.id,
+                    status='Pending',
+                    notified_at=datetime.utcnow()
+                )
+                db.session.add(new_match)
+                matches_created.append((new_match, donor))
+        
+        db.session.commit()
+        
+        response = {
+            'request_details': {
+                'request_id': blood_request.id,
+                'patient_name': blood_request.name,  # Changed
+                'blood_type': blood_request.blood_type,
+                'location': blood_request.location,
+                'hospital': blood_request.hospital.name if blood_request.hospital else None,  # Changed
+                'urgency': blood_request.urgency_level
+            },
+            'matches': [{
+                'match_id': match.id,
+                'donor_id': donor.id,
+                'donor_name': donor.name,
+                'donor_blood_type': donor.blood_type,
+                'donor_location': donor.location,
+                'donor_contact': donor.phone,
+                'donor_availability': donor.availability_status,
+                'last_donation_date': donor.last_donation_date.isoformat() if donor.last_donation_date else None,
+                'status': match.status,
+                'match_date': match.notified_at.isoformat(),
+                'distance_km': getattr(donor, 'distance', None)
+            } for match, donor in matches_created]
+        }
+        
+        # Send notifications
+        for match, donor in matches_created:
+            try:
+                message = f"Hello {donor.name}, you've been matched with a blood request. " \
+                         f"Blood type needed: {blood_request.blood_type}, " \
+                         f"Hospital: {blood_request.hospital.name if blood_request.hospital else 'Unknown'}, " f"Urgency: {blood_request.urgency_level}."
+                
+                requests.post(
+                    "http://localhost:5000/api/v1/notifications/",
+                    json={
+                        'donor_id': donor.id,
+                        'request_id': blood_request.id,
+                        'message': message
+                    }
+                )
+                
+                match.status = 'Notified'
+                db.session.commit()
+            except Exception as e:
+                print(f"Error sending notification: {str(e)}")
+        
+        return jsonify(response), 201
+    except NotFound as e:
+        return jsonify({'error': str(e)}), 404
+    except SQLAlchemyError as e:
+        db.session.rollback()
+        return jsonify({'error': f'Database error: {str(e)}'}), 500
+    except Exception as e:
+        return jsonify({'error': f'Unexpected error: {str(e)}'}), 500
+
+@donor_match_bp.route('/for-request/<int:request_id>', methods=['GET'])
+def get_matches_for_request(request_id):
+    try:
+        blood_request = BloodRequest.query.get(request_id)
+        if not blood_request:
+            raise NotFound('Blood request not found')
+        
+        matches = DonorMatch.query.filter_by(request_id=request_id).all()
+        
+        response = {
+            'request_details': {
+                'patient_name': blood_request.name,  # Changed
+                'blood_type': blood_request.blood_type,
+                'hospital': blood_request.hospital.name if blood_request.hospital else None,  # Changed
+                'urgency': blood_request.urgency_level
+            },
+            'matches': []
+        }
+        
+        for match in matches:
+            donor = Donor.query.get(match.donor_id)
+            if not donor:
                 continue
                 
-            # Create matches for each potential donor
-            matches_for_this_request = 0
-            for donor in potential_donors:
-                # Check if match already exists
-                existing_match = DonorMatch.query.filter_by(
-                    request_id=request.id,
-                    donor_id=donor.id
-                ).first()
-                    
-                if not existing_match:
-                    new_match = DonorMatch(
-                        request_id=request.id,
-                        donor_id=donor.id,
-                        status='Pending',
-                        notified_at=datetime.utcnow()
-                    )
-                    db.session.add(new_match)
-                    matches_created += 1
-                    matches_for_this_request += 1
+            match_info = {
+                'match_id': match.id,
+                'donor_name': donor.name,
+                'donor_blood_type': donor.blood_type,
+                'donor_location': donor.location,
+                'donor_availability': donor.availability_status,
+                'status': match.status,
+                'matched_at': match.notified_at.isoformat()
+            }
             
-            db.session.commit()
+            if blood_request.location and donor.location:
+                try:
+                    req_lat, req_long = map(float, blood_request.location.split(','))
+                    donor_lat, donor_long = map(float, donor.location.split(','))
+                    distance = geodesic((req_lat, req_long), (donor_lat, donor_long)).km
+                    match_info['distance_km'] = round(distance, 2)
+                except:
+                    pass
             
-            # Send notifications for each new match
-            if matches_for_this_request > 0:
-                # Get all new matches for this request
-                new_matches = DonorMatch.query.filter_by(
-                    request_id=request.id,
-                    status='Pending'
-                ).all()
-                
-                for match in new_matches:
-                    try:
-                        # Get the donor and blood request
-                        donor = Donor.query.get(match.donor_id)
-                        blood_request = BloodRequest.query.get(match.request_id)
-                        
-                        if donor and blood_request:
-                            # Create message
-                            message = f"Hello {donor.name}, you have been matched with a blood request. " \
-                                    f"Blood type needed: {blood_request.blood_type}, " \
-                                    f"Urgency: {blood_request.urgency_level}. " \
-                                    f"Please respond if you can donate."
-                            
-                            # Prepare notification data
-                            notification_data = {
-                                'donor_id': donor.id,
-                                'request_id': blood_request.id,
-                                'message': message
-                            }
-                            
-                            # Send the notification
-                            notification_response = requests.post(
-                                "http://localhost:5000/api/v1/notifications/",
-                                json=notification_data
-                            )
-                            
-                            # Update match status if notification was sent successfully
-                            if notification_response.status_code == 201:
-                                match.status = 'Notified'
-                                db.session.commit()
-                    except Exception as e:
-                        # Log the error but continue with other notifications
-                        print(f"Error sending notification to donor {match.donor_id}: {str(e)}")
+            response['matches'].append(match_info)
         
-        # Send notifications for requests with no matches
-        for request_id in requests_with_no_matches:
+        return jsonify(response), 200
+    except NotFound as e:
+        return jsonify({'error': str(e)}), 404
+    except SQLAlchemyError as e:
+        return jsonify({'error': 'Database error occurred'}), 500
+
+@donor_match_bp.route('/<int:id>', methods=['PUT'])
+def update_donor_match(id):
+    try:
+        data = request.get_json()
+        if not data:
+            raise BadRequest('No input data provided')
+            
+        match = DonorMatch.query.get(id)
+        if not match:
+            raise NotFound('Donor match not found')
+            
+        previous_status = match.status
+        
+        if 'status' in data:
+            match.status = data['status']
+        
+        db.session.commit()
+        
+        if 'status' in data and previous_status != data['status']:
             try:
-                # Get the blood request
-                blood_request = BloodRequest.query.get(request_id)
-                if blood_request and hasattr(blood_request, 'requester_id'):
-                    # Get the requester
-                    requester = Donor.query.get(blood_request.requester_id)
-                    if requester:
-                        # Create message
-                        message = f"We regret to inform you that no matching donors have been found yet for your " \
-                                f"blood request (type {blood_request.blood_type}). We will continue searching " \
-                                f"and notify you when a match is found."
-                        
-                        # Prepare notification data
-                        notification_data = {
-                            'donor_id': requester.id,
+                donor = Donor.query.get(match.donor_id)
+                blood_request = BloodRequest.query.get(match.request_id)
+                
+                if donor and blood_request:
+                    if data['status'] == 'Accepted':
+                        message = f"Thank you for accepting to donate for {blood_request.name} at {blood_request.hospital.name if blood_request.hospital else 'the hospital'}."  # Changed
+                        blood_request.status = 'Matched'
+                    elif data['status'] == 'Declined':
+                        message = f"You declined the donation request for {blood_request.name}."  # Changed
+                    elif data['status'] == 'Completed':
+                        message = f"Thank you for your donation! You helped save a life at {blood_request.hospital.name if blood_request.hospital else 'the hospital'}."  # Changed
+                    else:
+                        message = f"Your donation status has been updated to: {data['status']}"
+                    
+                    db.session.commit()
+                    
+                    requests.post(
+                        "http://localhost:5000/api/v1/notifications/",
+                        json={
+                            'donor_id': donor.id,
                             'request_id': blood_request.id,
                             'message': message
                         }
-                        
-                        # Send the notification
-                        requests.post(
-                            "http://localhost:5000/api/v1/notifications/",
-                            json=notification_data
-                        )
+                    )
             except Exception as e:
-                # Log the error but continue with other notifications
-                print(f"Error sending no-match notification for request {request_id}: {str(e)}")
-                
-        return jsonify({
-            'message': f'Created {matches_created} new potential matches',
-            'requests_with_no_matches': len(requests_with_no_matches)
-        }), 201
-            
+                print(f"Error handling status change: {str(e)}")
+        
+        return jsonify(match.to_dict()), 200
+    except BadRequest as e:
+        return jsonify({'error': str(e)}), 400
+    except NotFound as e:
+        return jsonify({'error': str(e)}), 404
     except SQLAlchemyError as e:
         db.session.rollback()
         return jsonify({'error': 'Database error occurred'}), 500
 
-
-
-# # In your blood request controller
-# @blood_request_bp.route('/<int:id>', methods=['GET'])
-# def get_blood_request(id):
-#     try:
-#         request = BloodRequest.query.get(id)
-#         if not request:
-#             raise NotFound('Blood request not found')
+@donor_match_bp.route('/<int:id>', methods=['DELETE'])
+def delete_donor_match(id):
+    try:
+        match = DonorMatch.query.get(id)
+        if not match:
+            raise NotFound('Donor match not found')
             
-#         # Get the match count
-#         match_count = DonorMatch.query.filter_by(request_id=id).count()
-        
-#         response = request.to_dict()
-#         response['match_count'] = match_count
-        
-#         return jsonify(response), 200
-#     except NotFound as e:
-#         return jsonify({'error': str(e)}), 404
-#     except SQLAlchemyError as e:
-#         return jsonify({'error': 'Database error occurred'}), 500
+        db.session.delete(match)
+        db.session.commit()
+            
+        return jsonify({'message': 'Donor match deleted successfully'}), 200
+    except NotFound as e:
+        return jsonify({'error': str(e)}), 404
+    except SQLAlchemyError as e:
+        db.session.rollback()
+        return jsonify({'error': 'Database error occurred'}), 500
